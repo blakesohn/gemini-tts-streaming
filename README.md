@@ -30,7 +30,26 @@ This project demonstrates two different Text-to-Speech (TTS) streaming approache
 
 ## Environment Setup
 
-### Option 1: Automated Setup (Recommended)
+### Step 1: Configure Google Cloud Project
+
+Copy the example environment file and set your project ID:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and update with your Google Cloud project details:
+
+```bash
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_CLOUD_REGION=us-central1
+```
+
+> **Note**: The `.env` file is gitignored and will not be committed to version control.
+
+### Step 2: Install and Run
+
+#### Option 1: Automated Setup (Recommended)
 
 The `run_web.sh` script automatically creates the virtual environment and installs dependencies.
 
@@ -39,15 +58,23 @@ chmod +x run_web.sh
 ./run_web.sh
 ```
 
+
 ### Option 2: Manual Setup
 
-#### 1. Create Virtual Environment
+#### 1. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env and set your GOOGLE_CLOUD_PROJECT
+```
+
+#### 2. Create Virtual Environment
 
 ```bash
 python3 -m venv venv
 ```
 
-#### 2. Activate Virtual Environment
+#### 3. Activate Virtual Environment
 
 **macOS/Linux:**
 ```bash
@@ -59,7 +86,7 @@ source venv/bin/activate
 venv\Scripts\activate
 ```
 
-#### 3. Install Dependencies
+#### 4. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -72,13 +99,6 @@ pip install -r requirements.txt
 - `uvicorn`: ASGI server
 - `jinja2`: HTML template engine
 - `python-dotenv`: Environment variable management
-
-#### 4. Set Environment Variables
-
-```bash
-export GOOGLE_CLOUD_PROJECT=your-project-id
-export GOOGLE_CLOUD_REGION=us-central1
-```
 
 ---
 
