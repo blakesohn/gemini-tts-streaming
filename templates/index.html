@@ -497,12 +497,20 @@
             const wsLLM = new WebSocket("ws://" + window.location.host + "/ws/llm-tts");
             wsLLM.binaryType = "arraybuffer";
 
+            let method3StartTime = 0;
+            let firstAudioReceived = false;
+
             wsLLM.onopen = () => {
                 status.innerHTML = "Generating & Streaming...";
                 wsLLM.send(JSON.stringify({ text: prompt }));
+                method3StartTime = performance.now();
+                firstAudioReceived = false;
             };
 
             wsLLM.onmessage = (event) => {
+                const now = performance.now();
+                const timeSinceStart = ((now - method3StartTime) / 1000).toFixed(3);
+
                 // Determine if binary (audio) or text (JSON)
                 if (typeof event.data === "string") {
                     try {
@@ -516,7 +524,8 @@
                             const container = document.getElementById('llmTextLog');
                             const el = document.createElement('div');
                             el.className = 'input-bubble';
-                            el.textContent = data.content;
+                            // Add timestamp
+                            el.textContent = `[${timeSinceStart}s] ${data.content}`;
                             container.prepend(el);
                         }
                     } catch (e) {
@@ -526,7 +535,13 @@
                     const uint8Data = new Uint8Array(event.data);
                     // Reuse Mulaw player
                     playMulawChunk(uint8Data, { rate: 24000, channels: 1 });
-                    status.innerHTML = "Playing audio...";
+
+                    let statusMsg = "Playing audio...";
+                    if (!firstAudioReceived) {
+                        firstAudioReceived = true;
+                        statusMsg += ` (TTFA: ${timeSinceStart}s)`;
+                    }
+                    status.innerHTML = statusMsg;
 
                     // Visualize Audio in Monitor
                     const container = document.getElementById('llmAudioLog');
@@ -535,7 +550,7 @@
                     const logEntry = document.createElement('div');
                     logEntry.style.fontSize = '10px';
                     logEntry.style.color = '#0f0';
-                    logEntry.innerHTML = `<span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
+                    logEntry.innerHTML = `[${timeSinceStart}s] <span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
                     container.prepend(logEntry);
                 }
             };

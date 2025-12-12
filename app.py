@@ -208,7 +208,7 @@ async def websocket_llm_tts(websocket: WebSocket):
             return
             
         # 0. Enforce length limit via prompt
-        prompt += " (Please keep the response under 500 characters)"
+        prompt += " (Please keep the response under 1000 characters)"
 
         def run_session():
             """Runs the synchronous LLM -> TTS chain."""
