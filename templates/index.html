@@ -93,31 +93,29 @@
             flex: 1;
             background: #1e1e1e;
             color: #00ff00;
-            padding: 1rem;
             border-radius: 8px;
             font-family: 'Courier New', Courier, monospace;
             font-size: 12px;
             height: 200px;
-            overflow-y: auto;
-            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            /* Header stays, content scrolls */
         }
 
         .monitor-title {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
             background: #333;
             color: white;
             padding: 4px 10px;
             font-size: 11px;
             font-weight: bold;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
+            /* No longer absolute */
         }
 
         .monitor-content {
-            margin-top: 20px;
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
             display: flex;
             flex-direction: column;
             gap: 4px;
@@ -171,7 +169,7 @@
 
         <div id="wsStatus">Disconnected</div>
 
-        <!-- Streaming Monitor UI -->
+        <!-- Method 2 Monitor -->
         <div class="monitor-container">
             <div class="monitor-panel">
                 <div class="monitor-title">INPUT STREAM (Text Chunks)</div>
@@ -182,6 +180,33 @@
                 <div class="monitor-content" id="outputStreamLog">
                     <!-- Bars will appear here -->
                 </div>
+            </div>
+        </div>
+
+        <hr style="margin: 2rem 0; width: 100%; border: 1px solid #eee;">
+
+        <h2>Method 3: LLM Response (Gemini Flash -> TTS)</h2>
+        <p style="font-size:14px; color:#666;">Ask a question to Gemini 2.5 Flash.</p>
+        <textarea id="llmInput" placeholder="커버드콜이 뭔지 알려주고 투자시 주의할 사항을 알려줘">커버드콜이 뭔지 알려주고 투자시 주의할 사항을 알려줘</textarea>
+        <button id="llmSendBtn" onclick="sendLLMPrompt()">Send & Listen</button>
+        <div id="llmStatus">Ready</div>
+
+        <div id="llmResponseContainer" style="margin-top: 1rem; text-align: left; display:none;">
+            <strong>Gemini Response:</strong>
+            <div id="llmResponse"
+                style="background: #e8f0fe; padding: 1rem; border-radius: 8px; min-height: 50px; white-space: pre-wrap; font-family: monospace;">
+            </div>
+        </div>
+
+        <!-- Method 3 Monitor (New) -->
+        <div class="monitor-container">
+            <div class="monitor-panel">
+                <div class="monitor-title">LLM TEXT STREAM (Chunks)</div>
+                <div class="monitor-content" id="llmTextLog"></div>
+            </div>
+            <div class="monitor-panel">
+                <div class="monitor-title">OUTPUT STREAM (Audio Packets)</div>
+                <div class="monitor-content" id="llmAudioLog"></div>
             </div>
         </div>
     </div>
@@ -390,8 +415,8 @@
             const el = document.createElement('div');
             el.className = 'input-bubble';
             el.textContent = `> ${text}`;
-            container.appendChild(el);
-            container.scrollTop = container.scrollHeight; // Auto-scroll
+            container.prepend(el); // New on top
+            // No auto-scroll
         }
 
         function visualizeOutputChunk(byteLength) {
@@ -418,8 +443,7 @@
             logEntry.style.color = '#0f0';
             logEntry.innerHTML = `<span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
 
-            container.appendChild(logEntry);
-            container.scrollTop = container.scrollHeight;
+            container.prepend(logEntry); // New on top
         }
 
 
@@ -445,6 +469,88 @@
             }
             source.start(nextStartTime);
             nextStartTime += buffer.duration;
+        }
+
+        // --- Method 3: LLM -> TTS ---
+        async function sendLLMPrompt() {
+            initAudio();
+            const input = document.getElementById('llmInput');
+            const status = document.getElementById('llmStatus');
+            const btn = document.getElementById('llmSendBtn');
+            const responseContainer = document.getElementById('llmResponseContainer');
+            const responseDiv = document.getElementById('llmResponse');
+            const prompt = input.value;
+
+            if (!prompt.trim()) return;
+
+            btn.disabled = true;
+            status.innerHTML = "Connecting...";
+            responseContainer.style.display = 'block';
+            responseDiv.innerHTML = ''; // Clear previous
+
+            // Resume context if needed
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            nextStartTime = audioContext.currentTime;
+
+            const wsLLM = new WebSocket("ws://" + window.location.host + "/ws/llm-tts");
+            wsLLM.binaryType = "arraybuffer";
+
+            wsLLM.onopen = () => {
+                status.innerHTML = "Generating & Streaming...";
+                wsLLM.send(JSON.stringify({ text: prompt }));
+            };
+
+            wsLLM.onmessage = (event) => {
+                // Determine if binary (audio) or text (JSON)
+                if (typeof event.data === "string") {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.type === "text") {
+                            responseDiv.innerHTML += data.content;
+                            // Scroll to bottom
+                            responseDiv.scrollTop = responseDiv.scrollHeight;
+
+                            // Visualize Text Chunk in Monitor
+                            const container = document.getElementById('llmTextLog');
+                            const el = document.createElement('div');
+                            el.className = 'input-bubble';
+                            el.textContent = data.content;
+                            container.prepend(el);
+                        }
+                    } catch (e) {
+                        console.error("Error parsing JSON", e);
+                    }
+                } else if (event.data instanceof ArrayBuffer) {
+                    const uint8Data = new Uint8Array(event.data);
+                    // Reuse Mulaw player
+                    playMulawChunk(uint8Data, { rate: 24000, channels: 1 });
+                    status.innerHTML = "Playing audio...";
+
+                    // Visualize Audio in Monitor
+                    const container = document.getElementById('llmAudioLog');
+                    const byteLength = uint8Data.byteLength;
+                    let width = Math.min(100, Math.max(5, byteLength / 20));
+                    const logEntry = document.createElement('div');
+                    logEntry.style.fontSize = '10px';
+                    logEntry.style.color = '#0f0';
+                    logEntry.innerHTML = `<span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
+                    container.prepend(logEntry);
+                }
+            };
+
+            wsLLM.onclose = () => {
+                console.log("[Method 3] Disconnected");
+                status.innerHTML = "Done (Connection closed)";
+                btn.disabled = false;
+            };
+
+            wsLLM.onerror = (err) => {
+                console.error(err);
+                status.innerHTML = "Error occurred";
+                btn.disabled = false;
+            };
         }
     </script>
 </body>

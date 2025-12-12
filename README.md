@@ -10,6 +10,7 @@ This project demonstrates two different Text-to-Speech (TTS) streaming approache
 - [Architecture Overview](#architecture-overview)
   - [Method 1: Unidirectional (Vertex AI)](#method-1-unidirectional-vertex-ai)
   - [Method 2: Bidirectional (Cloud TTS gRPC)](#method-2-bidirectional-cloud-tts-grpc)
+  - [Method 3: LLM Response (Gemini Flash -> TTS)](#method-3-llm-response-gemini-flash---tts)
 - [Usage Guide](#usage-guide)
 
 ---
@@ -225,8 +226,50 @@ Output Audio Stream       Session Control                        Streaming Respo
 - **Connect**: Start WebSocket connection
 - **Stop**: Close connection and reset UI
 - **Streaming Monitor**: 
-  - Left panel: Log of sent text
-  - Right panel: Bar graph of received audio bytes
+  - **Location**: dedicated panel below the input area
+  - **Structure**:
+    - **Top (Newest)**: Latest text chunks and audio packets (LIFO order)
+    - **Fixed Header**: Monitor titles remain visible during scrolling
+
+---
+
+### Method 3: LLM Response (Gemini Flash -> TTS)
+
+**End-to-End Streaming**: Generates text responses from a Large Language Model (Gemini 2.5 Flash) and converts them to speech in real-time.
+
+#### Components
+
+- **LLM**: `gemini-2.5-flash` (via Vertex AI `v1` API)
+- **TTS**: Cloud Text-to-Speech (gRPC streaming)
+- **Protocol**: Single WebSocket handling dual streams (Text JSON + Audio Binary)
+
+#### Flow
+
+```
+[Browser] --WebSocket (Prompt)--> [FastAPI Server] --generate_content_stream--> [Gemini Flash]
+                                         |                                            |
+                                         |<--Text Chunks------------------------------|
+                                         |
+[Browser] <--JSON (Text)--------- [FastAPI Server] --StreamingSynthesize------> [Cloud TTS]
+[Browser] <--Binary (Audio)------ [FastAPI Server] <--Audio Chunks------------- [Cloud TTS]
+```
+
+1. **Prompt**: User sends a question (e.g., "Why is the sky blue?")
+2. **Generation**: Gemini Flash streams text chunks
+3. **Buffering**: Server buffers the *first* chunk to ensure valid input for TTS
+4. **Dual Streaming**:
+   - **Text**: Sent immediately to valid via WebSocket for display
+   - **Audio**: Text is piped to Cloud TTS; resulting audio is sent to client
+5. **Visualization**:
+   - **LLM TEXT STREAM**: Visualizes incoming text chunks
+   - **OUTPUT STREAM**: Visualizes incoming audio packets
+
+#### Features
+
+- ✅ **Low Latency**: Uses Flash model for fast generation
+- ✅ **Visual Feedback**: Simultaneous text and audio streaming
+- ✅ **Stability**: Logic handles potential timeouts by buffering initial response
+- ✅ **Constraint**: Prompts automatically ask for concise answers (< 500 chars) for better demo experience
 
 ---
 
@@ -250,13 +293,25 @@ Output Audio Stream       Session Control                        Streaming Respo
 7. Additional text can be entered (connection persists)
 8. Click "Stop" to close connection
 
+### Testing Method 3
+
+1. Locate "Method 3: LLM Response (Gemini Flash -> TTS)" section
+2. Enter a question (or use the default)
+3. Click **Send & Listen**
+4. Observe:
+   - **Blue Response Box**: Text streams in character-by-character
+   - **Method 3 Monitor**:
+     - **LLM TEXT STREAM**: Shows text chunks arriving (Newest on top)
+     - **OUTPUT STREAM**: Shows audio packets arriving (Newest on top)
+5. Listen to the generated response
+
 ---
 
 ## Project Structure
 
 ```
 gemini-tts/
-├── app.py                  # FastAPI application (Methods 1 & 2)
+├── app.py                  # FastAPI application (Methods 1, 2, & 3)
 ├── main.py                 # CLI testing tool
 ├── requirements.txt        # Python dependencies
 ├── run_web.sh             # Automated run script
@@ -294,6 +349,4 @@ Enable in Google Cloud Console:
 
 ---
 
-## License
 
-MIT License

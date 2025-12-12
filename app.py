@@ -177,6 +177,137 @@ async def websocket_tts(websocket: WebSocket):
         manager_task.cancel()
         print("[WebSocket] Disconnected")
 
+@app.websocket("/ws/llm-tts")
+async def websocket_llm_tts(websocket: WebSocket):
+    await websocket.accept()
+    print("[WebSocket] Connected to LLM-TTS")
+
+    # Shared Audio Config (Same as before)
+    audio_config = texttospeech.StreamingAudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MULAW,
+        sample_rate_hertz=24000
+    )
+    voice_config = texttospeech.VoiceSelectionParams(
+        language_code="en-US", 
+        name="en-US-Journey-F"
+    )
+    streaming_config = texttospeech.StreamingSynthesizeConfig(
+        voice=voice_config,
+        streaming_audio_config=audio_config
+    )
+
+    loop = asyncio.get_running_loop()
+
+    try:
+        # 1. Wait for user prompt
+        data = await websocket.receive_json()
+        prompt = data.get("text")
+        print(f"[LLM-TTS] Received prompt: {prompt}")
+
+        if not prompt:
+            return
+            
+        # 0. Enforce length limit via prompt
+        prompt += " (Please keep the response under 500 characters)"
+
+        def run_session():
+            """Runs the synchronous LLM -> TTS chain."""
+            try:
+                # Use a specific client for Gemini 2.5 Flash as requested
+                # Note: This assumes credentials (ADC) are sufficient or env vars are set.
+                # If using Vertex AI, we might not need HttpOptions(api_version="v1") if the model is in the model garden,
+                # but the user specifically asked for this configuration.
+                # Use the existing import: from google.genai.types import HttpOptions (need to ensure it's imported)
+                
+                # Check imports - we need to make sure HttpOptions is available or import it here if needed.
+                # Since we can't easily see imports at the top without reading again, we'll assume types is available 
+                # as `from google.genai import types`. 
+                # However, the user snippet had: `from google.genai.types import HttpOptions`
+                
+                # Let's verify imports first or just access via types if possible.
+                # Checking `app.py` previously: `from google.genai import types`
+                # So we can try `types.HttpOptions`.
+
+                flash_client = genai.Client(
+                    vertexai=True,
+                    project=project_id,
+                    location=location,
+                    http_options=types.HttpOptions(api_version="v1")
+                )
+
+                # Generator that feeds TTS from LLM
+                def tts_request_generator():
+                    print("[LLM-TTS] Requesting Gemini stream...")
+                    
+                    llm_stream = flash_client.models.generate_content_stream(
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                    )
+                    
+                    # Create an iterator to manually buffer the first chunk
+                    llm_iterator = iter(llm_stream)
+                    try:
+                        # Wait for the first chunk BEFORE sending TTS config
+                        # This prevents the TTS stream from timing out (5s limit) while waiting for LLM
+                        first_chunk = next(llm_iterator)
+                    except StopIteration:
+                        print("[LLM-TTS] No content generated.")
+                        return
+                    except Exception as e:
+                        print(f"[LLM-TTS] Error generating content: {e}")
+                        return
+
+                    # 1. Send TTS Config (now that we have data)
+                    yield texttospeech.StreamingSynthesizeRequest(streaming_config=streaming_config)
+                    
+                    # 2. Send the first chunk
+                    if first_chunk.text:
+                        print(f"[LLM-TTS] Chunk: {first_chunk.text}")
+                        # Send text to UI
+                        asyncio.run_coroutine_threadsafe(
+                            websocket.send_json({"type": "text", "content": first_chunk.text}),
+                            loop
+                        )
+                        yield texttospeech.StreamingSynthesizeRequest(
+                            input=texttospeech.StreamingSynthesisInput(text=first_chunk.text)
+                        )
+
+                    # 3. Stream the rest
+                    for chunk in llm_iterator:
+                        if chunk.text:
+                            print(f"[LLM-TTS] Chunk: {chunk.text}")
+                            # Send text to UI
+                            asyncio.run_coroutine_threadsafe(
+                                websocket.send_json({"type": "text", "content": chunk.text}),
+                                loop
+                            )
+                            yield texttospeech.StreamingSynthesizeRequest(
+                                input=texttospeech.StreamingSynthesisInput(text=chunk.text)
+                            )
+                
+                # 3. Consume TTS Audio Stream
+                tts_responses = tts_client.streaming_synthesize(tts_request_generator())
+                
+                for response in tts_responses:
+                    if response.audio_content:
+                        asyncio.run_coroutine_threadsafe(
+                            websocket.send_bytes(response.audio_content),
+                            loop
+                        )
+            except Exception as e:
+                print(f"[LLM-TTS] Session Error: {e}")
+
+        # Run the blocking session in a thread
+        await loop.run_in_executor(None, run_session)
+
+    except WebSocketDisconnect:
+        print("[WebSocket] Client disconnected")
+    except Exception as e:
+        print(f"[WebSocket] Error: {e}")
+    finally:
+        await websocket.close()
+
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8001)

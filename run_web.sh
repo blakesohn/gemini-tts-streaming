@@ -29,6 +29,9 @@ fi
 # Set default region if not specified
 export GOOGLE_CLOUD_REGION=${GOOGLE_CLOUD_REGION:-us-central1}
 
+# Suppress gRPC fork warnings
+export GRPC_ENABLE_FORK_SUPPORT=0
+
 echo "Starting Web Application..."
 echo "Project: $GOOGLE_CLOUD_PROJECT"
 echo "Region: $GOOGLE_CLOUD_REGION"
