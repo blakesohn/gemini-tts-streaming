@@ -189,14 +189,15 @@ async def websocket_llm_tts(websocket: WebSocket):
     await websocket.accept()
     print("[WebSocket] Connected to LLM-TTS")
 
-    # Shared Audio Config (Same as before)
+    # Shared Audio Config - Using PCM (7) for gemini-2.5-pro-tts
     audio_config = texttospeech.StreamingAudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MULAW,
+        audio_encoding=texttospeech.AudioEncoding.PCM,
         sample_rate_hertz=24000
     )
     voice_config = texttospeech.VoiceSelectionParams(
         language_code="en-US", 
-        name="en-US-Journey-F"
+        name="Kore",
+        model_name="gemini-2.5-pro-tts"
     )
     streaming_config = texttospeech.StreamingSynthesizeConfig(
         voice=voice_config,

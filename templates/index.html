@@ -540,8 +540,8 @@
                     }
                 } else if (event.data instanceof ArrayBuffer) {
                     const uint8Data = new Uint8Array(event.data);
-                    // Reuse Mulaw player
-                    playMulawChunk(uint8Data, { rate: 24000, channels: 1 });
+                    // Use LINEAR16 player (PCM)
+                    playChunk(uint8Data, { rate: 24000, channels: 1 });
 
                     let statusMsg = "Playing audio...";
                     if (!firstAudioReceived) {

@@ -29,3 +29,11 @@ Thumbs.db
 # Logs
 *.log
 check_*.py
+
+test*.py
+.gemini/*
+.gemini
+test_grpc.py
+
+*.backup
+inspect_enums.py
