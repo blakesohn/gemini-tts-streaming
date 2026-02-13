@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 from google.cloud import texttospeech_v1beta1 as texttospeech
 from pydantic import BaseModel
+import concurrent.futures
 import uvicorn
 
 app = FastAPI()
@@ -17,7 +18,7 @@ templates = Jinja2Templates(directory="templates")
 
 # Initialize Client (Vertex AI) - Keeping for reference or fallback
 project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-location = os.getenv("GOOGLE_CLOUD_REGION", "us-central1")
+location = os.getenv("GOOGLE_CLOUD_REGION", "global")
 client = genai.Client(vertexai=True, project=project_id, location=location)
 
 # Initialize Client (Cloud TTS - gRPC)
@@ -27,7 +28,8 @@ tts_client = texttospeech.TextToSpeechClient()
 flash_client = genai.Client(
     vertexai=True,
     project=project_id,
-    location=location
+    location=location,
+    http_options={'api_version': 'v1'}
 )
 
 class TTSRequest(BaseModel):
@@ -219,90 +221,177 @@ async def websocket_llm_tts(websocket: WebSocket):
         prompt += " (Please keep the response under 500 characters)"
 
         def run_session():
-            """Runs the synchronous LLM -> TTS chain."""
+            """Runs the LLM -> TTS chain using Pipelined Concurrency."""
             try:
-                # Use a specific client for Gemini 2.5 Flash as requested
-                # Note: This assumes credentials (ADC) are sufficient or env vars are set.
-                # If using Vertex AI, we might not need HttpOptions(api_version="v1") if the model is in the model garden,
-                # but the user specifically asked for this configuration.
-                # Use the existing import: from google.genai.types import HttpOptions (need to ensure it's imported)
-                
-                # Generator that feeds TTS from LLM (using global flash_client)
-                start_time = datetime.datetime.now()
-                
-                def tts_request_generator():
-                    print(f"[LLM-TTS] [{datetime.datetime.now()}] Requesting Gemini stream...")
-                    
-                    llm_stream = flash_client.models.generate_content_stream(
-                        model="gemini-2.5-flash",
-                        contents=prompt,
-                    )
-                    
-                    # Create an iterator to manually buffer the first chunk
-                    llm_iterator = iter(llm_stream)
+                # Thread-safe queue for sentences
+                # Items: str (sentence) or None (EOF)
+                sentence_queue = queue.Queue()
+
+                # Ordered Queue for Audio Futures
+                # Items: (sentence_text, Future object) or None (EOF)
+                audio_future_queue = queue.Queue()
+
+                # --- Producer: LLM Reader ---
+                def llm_producer():
+                    print(f"[LLM-Producer] [{datetime.datetime.now()}] Requesting Gemini stream...")
                     try:
-                        # Wait for the first chunk BEFORE sending TTS config
-                        # This prevents the TTS stream from timing out (5s limit) while waiting for LLM
-                        first_chunk = next(llm_iterator)
-                        print(f"[LLM-TTS] [{datetime.datetime.now()}] Received first LLM chunk (Delay: {(datetime.datetime.now() - start_time).total_seconds():.3f}s)")
-                    except StopIteration:
-                        print("[LLM-TTS] No content generated.")
-                        return
+                        llm_stream = flash_client.models.generate_content_stream(
+                            model="gemini-2.5-flash",
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_modalities=["TEXT"]
+                            )
+                        )
+                        
+                        buffer = ""
+                        for chunk in llm_stream:
+                            text = chunk.text
+                            if text:
+                                # Send raw text to UI immediately for low-latency text stream
+                                asyncio.run_coroutine_threadsafe(
+                                    websocket.send_json({"type": "text", "content": text}),
+                                    loop
+                                )
+                                
+                                buffer += text
+                                # Simple sentence splitting logic on delimiters
+                                while True:
+                                    # Find first delimiter
+                                    match = None
+                                    min_idx = -1
+                                    
+                                    for delimiter in ['.', '?', '!', '\n']:
+                                        idx = buffer.find(delimiter)
+                                        if idx != -1:
+                                            if min_idx == -1 or idx < min_idx:
+                                                min_idx = idx
+                                    
+                                    if min_idx != -1:
+                                        # We have a sentence end
+                                        sentence = buffer[:min_idx+1].strip()
+                                        buffer = buffer[min_idx+1:]
+                                        
+                                        if sentence:
+                                            print(f"[LLM-Producer] [{datetime.datetime.now()}] Queueing sentence ({len(sentence)} chars): {sentence[:30]}...")
+                                            sentence_queue.put(sentence)
+                                            
+                                            # Notify UI of the full sentence unit
+                                            asyncio.run_coroutine_threadsafe(
+                                                websocket.send_json({
+                                                    "type": "llm_sentence", 
+                                                    "content": sentence,
+                                                    "timestamp": datetime.datetime.now().isoformat()
+                                                }),
+                                                loop
+                                            )
+                                    else:
+                                        break
+                        
+                        # End of stream, put remaining buffer if any
+                        if buffer.strip():
+                             print(f"[LLM-Producer] [{datetime.datetime.now()}] Queueing remaining: {buffer[:30]}...")
+                             sentence_queue.put(buffer.strip())
+                             
+                        sentence_queue.put(None) # EOF for Scheduler
+                        print(f"[LLM-Producer] [{datetime.datetime.now()}] Finished.")
+                        
                     except Exception as e:
-                        print(f"[LLM-TTS] Error generating content: {e}")
-                        return
+                        print(f"[LLM-Producer] Error: {e}")
+                        sentence_queue.put(None)
 
-                    # 1. Send TTS Config (now that we have data)
-                    print(f"[LLM-TTS] [{datetime.datetime.now()}] Sending TTS Config...")
-                    yield texttospeech.StreamingSynthesizeRequest(streaming_config=streaming_config)
-                    
-                    # 2. Send the first chunk
-                    if first_chunk.text:
-                        print(f"[LLM-TTS] [{datetime.datetime.now()}] Sending first chunk to TTS: {first_chunk.text[:20]}...")
-                        # Send text to UI
-                        asyncio.run_coroutine_threadsafe(
-                            websocket.send_json({"type": "text", "content": first_chunk.text}),
-                            loop
-                        )
-                        yield texttospeech.StreamingSynthesizeRequest(
-                            input=texttospeech.StreamingSynthesisInput(text=first_chunk.text)
-                        )
+                # --- Consumer 1: TTS Scheduler ---
+                def tts_scheduler():
+                    print("[TTS-Scheduler] Started.")
+                    # Use a ThreadPoolExecutor to run TTS requests concurrently
+                    # max_workers=5 allows up to 5 sentences to be processed in parallel
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                        while True:
+                            sentence = sentence_queue.get()
+                            if sentence is None:
+                                print("[TTS-Scheduler] Received EOF from LLM. Signaling Audio Sender.")
+                                audio_future_queue.put(None) # EOF for Audio Sender
+                                break
+                            
+                            print(f"[TTS-Scheduler] [{datetime.datetime.now()}] Scheduling: {sentence[:30]}...")
 
-                    # 3. Stream the rest
-                    for chunk in llm_iterator:
-                        if chunk.text:
-                            print(f"[LLM-TTS] [{datetime.datetime.now()}] LLM Chunk: {chunk.text[:30]}...")
-                            # Send text to UI
+                            # Notify UI that processing started (Order preserved in scheduling)
                             asyncio.run_coroutine_threadsafe(
-                                websocket.send_json({"type": "text", "content": chunk.text}),
-                                loop
+                                 websocket.send_json({
+                                     "type": "audio_start", 
+                                     "sentence": sentence[:30] + "...",
+                                     "timestamp": datetime.datetime.now().isoformat()
+                                 }),
+                                 loop
                             )
-                            yield texttospeech.StreamingSynthesizeRequest(
-                                input=texttospeech.StreamingSynthesisInput(text=chunk.text)
-                            )
+
+                            # Define the task: Returns the response iterator
+                            def fetch_tts_stream(text_to_speak):
+                                def req_gen():
+                                    yield texttospeech.StreamingSynthesizeRequest(streaming_config=streaming_config)
+                                    yield texttospeech.StreamingSynthesizeRequest(
+                                        input=texttospeech.StreamingSynthesisInput(text=text_to_speak)
+                                    )
+                                # This call starts the RPC and returns an iterator
+                                return tts_client.streaming_synthesize(req_gen())
+
+                            # Submit to executor
+                            future = executor.submit(fetch_tts_stream, sentence)
+                            
+                            # Push future to ordered queue immediately to preserve playback order
+                            audio_future_queue.put((sentence, future))
+
+                # --- Consumer 2: Audio Sender ---
+                def audio_sender():
+                    print("[Audio-Sender] Started.")
+                    while True:
+                        item = audio_future_queue.get()
+                        if item is None:
+                            print("[Audio-Sender] Received EOF.")
+                            break
+                        
+                        sentence, future = item
+                        print(f"[Audio-Sender] [{datetime.datetime.now()}] Waiting for results of: {sentence[:30]}...")
+                        
+                        try:
+                            # Wait for the specific future to complete (in order)
+                            # Backpressure handled here: if retrieval is slow, queue fills up
+                            response_iterator = future.result()
+                            
+                            is_first_audio = True
+                            for response in response_iterator:
+                                if response.audio_content:
+                                    if is_first_audio:
+                                        print(f"[Audio-Sender] [{datetime.datetime.now()}] First audio byte for: {sentence[:30]}...")
+                                        is_first_audio = False
+                                        
+                                    asyncio.run_coroutine_threadsafe(
+                                        websocket.send_bytes(response.audio_content),
+                                        loop
+                                    )
+                        except Exception as e:
+                            print(f"[Audio-Sender] Error playing '{sentence[:30]}...': {e}")
                 
-                # 3. Consume TTS Audio Stream
-                print(f"[LLM-TTS] [{datetime.datetime.now()}] Initializing TTS streaming_synthesize...")
-                tts_responses = tts_client.streaming_synthesize(tts_request_generator())
+                # --- Encapsulate Thread Management ---
+                import threading
                 
-                is_first_audio = True
-                for response in tts_responses:
-                    if response.audio_content:
-                        if is_first_audio:
-                            print(f"[LLM-TTS] [{datetime.datetime.now()}] Received FIRST audio packet from Cloud TTS!")
-                            is_first_audio = False
-                        asyncio.run_coroutine_threadsafe(
-                            websocket.send_bytes(response.audio_content),
-                            loop
-                        )
+                prod_thread = threading.Thread(target=llm_producer, daemon=True)
+                sched_thread = threading.Thread(target=tts_scheduler, daemon=True)
+                send_thread = threading.Thread(target=audio_sender, daemon=True)
                 
-                total_time = (datetime.datetime.now() - start_time).total_seconds()
-                print(f"[LLM-TTS] [{datetime.datetime.now()}] Session completed in {total_time:.3f}s")
+                prod_thread.start()
+                sched_thread.start()
+                send_thread.start()
+                
+                prod_thread.join()
+                sched_thread.join()
+                send_thread.join()
+                
+                print(f"[LLM-TTS] [{datetime.datetime.now()}] Session completed")
                 
             except Exception as e:
                 print(f"[LLM-TTS] Session Error: {e}")
 
-        # Run the blocking session in a thread
+        # Run the blocking session manager in a thread (which spawns its own threads)
         await loop.run_in_executor(None, run_session)
 
     except WebSocketDisconnect:

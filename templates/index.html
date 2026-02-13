@@ -94,9 +94,12 @@
             background: #1e1e1e;
             color: #00ff00;
             border-radius: 8px;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 12px;
-            height: 200px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            /* More terminal-like */
+            font-size: 14px;
+            /* Bigger font */
+            height: 300px;
+            /* Taller */
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -187,7 +190,7 @@
 
         <h2>Method 3: LLM Response (Gemini Flash -> TTS)</h2>
         <p style="font-size:14px; color:#666;">Ask a question to Gemini 2.5 Flash.</p>
-        <textarea id="llmInput" placeholder="커버드콜이 뭔지 알려주고 투자시 주의할 사항을 알려줘">커버드콜이 뭔지 알려주고 투자시 주의할 사항을 알려줘</textarea>
+        <textarea id="llmInput" placeholder="인공지능의 역사에 대해 500자 수준으로 설명해줘">인공지능의 역사에 대해 500자 수준으로 설명해줘</textarea>
         <button id="llmSendBtn" onclick="sendLLMPrompt()">Send & Listen</button>
         <div id="llmStatus">Ready</div>
 
@@ -419,8 +422,8 @@
             const el = document.createElement('div');
             el.className = 'input-bubble';
             el.textContent = `> ${text}`;
-            container.prepend(el); // New on top
-            // No auto-scroll
+            container.appendChild(el); // Append bottom
+            container.scrollTop = container.scrollHeight;
         }
 
         function visualizeOutputChunk(byteLength) {
@@ -443,11 +446,16 @@
 
             // Let's just append a log entry for now, maybe with a small visual bar
             const logEntry = document.createElement('div');
-            logEntry.style.fontSize = '10px';
-            logEntry.style.color = '#0f0';
-            logEntry.innerHTML = `<span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
+            logEntry.style.fontSize = '12px';
+            logEntry.style.color = '#00ff00';
 
-            container.prepend(logEntry); // New on top
+            // Calculate duration: 16-bit (2 bytes) * 24000 Hz = 48000 bytes/sec
+            const durationMs = (byteLength / 48000 * 1000).toFixed(0);
+
+            logEntry.innerHTML = `<span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B (${durationMs}ms)`;
+
+            container.appendChild(logEntry); // Append bottom
+            container.scrollTop = container.scrollHeight;
         }
 
 
@@ -527,13 +535,34 @@
                             // Scroll to bottom
                             responseDiv.scrollTop = responseDiv.scrollHeight;
 
-                            // Visualize Text Chunk in Monitor
+                            // Visualize Text Chunk in Monitor (Reverted to Chunk-level)
                             const container = document.getElementById('llmTextLog');
                             const el = document.createElement('div');
                             el.className = 'input-bubble';
+                            el.style.color = '#cccccc';
                             // Add timestamp
                             el.textContent = `[${timeSinceStart}s] ${data.content}`;
-                            container.prepend(el);
+                            container.appendChild(el); // Append bottom
+                            container.scrollTop = container.scrollHeight; // Auto-scroll
+
+                        } else if (data.type === "llm_sentence") {
+                            // Valid but ignored to avoid duplicates
+                        } else if (data.type === "audio_start") {
+                            // Visualize Audio Start in Monitor
+                            const container = document.getElementById('llmAudioLog');
+                            const logEntry = document.createElement('div');
+                            logEntry.style.fontSize = '12px';
+                            logEntry.style.color = '#ffff00'; // Yellow for start event
+                            logEntry.style.borderTop = '1px solid #333';
+                            logEntry.style.marginTop = '4px';
+                            logEntry.style.paddingTop = '4px';
+
+                            // Parse timestamp from server if available, or just use client time
+                            // Server timestamp might be useful for correlation
+
+                            logEntry.innerHTML = `[${timeSinceStart}s] ⚡ Processing: "${data.sentence}"`;
+                            container.appendChild(logEntry); // Append bottom
+                            container.scrollTop = container.scrollHeight;
                         }
                     } catch (e) {
                         console.error("Error parsing JSON", e);
@@ -554,11 +583,18 @@
                     const container = document.getElementById('llmAudioLog');
                     const byteLength = uint8Data.byteLength;
                     let width = Math.min(100, Math.max(5, byteLength / 20));
+
                     const logEntry = document.createElement('div');
-                    logEntry.style.fontSize = '10px';
-                    logEntry.style.color = '#0f0';
-                    logEntry.innerHTML = `[${timeSinceStart}s] <span style="display:inline-block; width:${width}px; height:8px; background:#0f0; margin-right:5px;"></span> ${byteLength} B`;
-                    container.prepend(logEntry);
+                    logEntry.style.fontSize = '12px';
+                    logEntry.style.color = '#00ff00';
+                    logEntry.style.marginLeft = '20px'; // Indent
+
+                    const durationMs = (byteLength / 48000 * 1000).toFixed(0);
+
+                    logEntry.innerHTML = `[${timeSinceStart}s]  └─ Chunk: <span style="display:inline-block; width:${width}px; height:6px; background:#00ff00; margin-right:5px;"></span> ${byteLength} B (${durationMs}ms)`;
+
+                    container.appendChild(logEntry); // Append bottom
+                    container.scrollTop = container.scrollHeight;
                 }
             };
 
