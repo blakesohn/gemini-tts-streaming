@@ -215,7 +215,7 @@ async def websocket_llm_tts(websocket: WebSocket):
             return
             
         # 0. Enforce length limit via prompt
-        prompt += " (Please keep the response under 1000 characters)"
+        prompt += " (Please keep the response under 500 characters)"
 
         def run_session():
             """Runs the synchronous LLM -> TTS chain."""
@@ -226,16 +226,10 @@ async def websocket_llm_tts(websocket: WebSocket):
                 # but the user specifically asked for this configuration.
                 # Use the existing import: from google.genai.types import HttpOptions (need to ensure it's imported)
                 
-                # Check imports - we need to make sure HttpOptions is available or import it here if needed.
-                # Since we can't easily see imports at the top without reading again, we'll assume types is available 
-                # as `from google.genai import types`. 
-                # However, the user snippet had: `from google.genai.types import HttpOptions`
+                # Generator that feeds TTS from LLM (using global flash_client)
+                start_time = datetime.datetime.now()
                 
-                # Let's verify imports first or just access via types if possible.
-                # Checking `app.py` previously: `from google.genai import types`
-                # Generator that feeds TTS from LLM
                 def tts_request_generator():
-                    start_time = datetime.datetime.now()
                     print(f"[LLM-TTS] [{datetime.datetime.now()}] Requesting Gemini stream...")
                     
                     llm_stream = flash_client.models.generate_content_stream(
@@ -276,6 +270,7 @@ async def websocket_llm_tts(websocket: WebSocket):
                     # 3. Stream the rest
                     for chunk in llm_iterator:
                         if chunk.text:
+                            print(f"[LLM-TTS] [{datetime.datetime.now()}] LLM Chunk: {chunk.text[:30]}...")
                             # Send text to UI
                             asyncio.run_coroutine_threadsafe(
                                 websocket.send_json({"type": "text", "content": chunk.text}),
@@ -284,7 +279,6 @@ async def websocket_llm_tts(websocket: WebSocket):
                             yield texttospeech.StreamingSynthesizeRequest(
                                 input=texttospeech.StreamingSynthesisInput(text=chunk.text)
                             )
-                    print(f"[LLM-TTS] [{datetime.datetime.now()}] LLM Stream finished.")
                 
                 # 3. Consume TTS Audio Stream
                 print(f"[LLM-TTS] [{datetime.datetime.now()}] Initializing TTS streaming_synthesize...")
@@ -300,6 +294,10 @@ async def websocket_llm_tts(websocket: WebSocket):
                             websocket.send_bytes(response.audio_content),
                             loop
                         )
+                
+                total_time = (datetime.datetime.now() - start_time).total_seconds()
+                print(f"[LLM-TTS] [{datetime.datetime.now()}] Session completed in {total_time:.3f}s")
+                
             except Exception as e:
                 print(f"[LLM-TTS] Session Error: {e}")
 
