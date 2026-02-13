@@ -23,6 +23,13 @@ client = genai.Client(vertexai=True, project=project_id, location=location)
 # Initialize Client (Cloud TTS - gRPC)
 tts_client = texttospeech.TextToSpeechClient()
 
+# Initialize Client (Gemini Flash for Method 3)
+flash_client = genai.Client(
+    vertexai=True,
+    project=project_id,
+    location=location
+)
+
 class TTSRequest(BaseModel):
     text: str
     voice_name: str = "Puck"
@@ -226,18 +233,10 @@ async def websocket_llm_tts(websocket: WebSocket):
                 
                 # Let's verify imports first or just access via types if possible.
                 # Checking `app.py` previously: `from google.genai import types`
-                # So we can try `types.HttpOptions`.
-
-                flash_client = genai.Client(
-                    vertexai=True,
-                    project=project_id,
-                    location=location,
-                    http_options=types.HttpOptions(api_version="v1")
-                )
-
                 # Generator that feeds TTS from LLM
                 def tts_request_generator():
-                    print("[LLM-TTS] Requesting Gemini stream...")
+                    start_time = datetime.datetime.now()
+                    print(f"[LLM-TTS] [{datetime.datetime.now()}] Requesting Gemini stream...")
                     
                     llm_stream = flash_client.models.generate_content_stream(
                         model="gemini-2.5-flash",
@@ -250,6 +249,7 @@ async def websocket_llm_tts(websocket: WebSocket):
                         # Wait for the first chunk BEFORE sending TTS config
                         # This prevents the TTS stream from timing out (5s limit) while waiting for LLM
                         first_chunk = next(llm_iterator)
+                        print(f"[LLM-TTS] [{datetime.datetime.now()}] Received first LLM chunk (Delay: {(datetime.datetime.now() - start_time).total_seconds():.3f}s)")
                     except StopIteration:
                         print("[LLM-TTS] No content generated.")
                         return
@@ -258,11 +258,12 @@ async def websocket_llm_tts(websocket: WebSocket):
                         return
 
                     # 1. Send TTS Config (now that we have data)
+                    print(f"[LLM-TTS] [{datetime.datetime.now()}] Sending TTS Config...")
                     yield texttospeech.StreamingSynthesizeRequest(streaming_config=streaming_config)
                     
                     # 2. Send the first chunk
                     if first_chunk.text:
-                        print(f"[LLM-TTS] Chunk: {first_chunk.text}")
+                        print(f"[LLM-TTS] [{datetime.datetime.now()}] Sending first chunk to TTS: {first_chunk.text[:20]}...")
                         # Send text to UI
                         asyncio.run_coroutine_threadsafe(
                             websocket.send_json({"type": "text", "content": first_chunk.text}),
@@ -275,7 +276,6 @@ async def websocket_llm_tts(websocket: WebSocket):
                     # 3. Stream the rest
                     for chunk in llm_iterator:
                         if chunk.text:
-                            print(f"[LLM-TTS] Chunk: {chunk.text}")
                             # Send text to UI
                             asyncio.run_coroutine_threadsafe(
                                 websocket.send_json({"type": "text", "content": chunk.text}),
@@ -284,12 +284,18 @@ async def websocket_llm_tts(websocket: WebSocket):
                             yield texttospeech.StreamingSynthesizeRequest(
                                 input=texttospeech.StreamingSynthesisInput(text=chunk.text)
                             )
+                    print(f"[LLM-TTS] [{datetime.datetime.now()}] LLM Stream finished.")
                 
                 # 3. Consume TTS Audio Stream
+                print(f"[LLM-TTS] [{datetime.datetime.now()}] Initializing TTS streaming_synthesize...")
                 tts_responses = tts_client.streaming_synthesize(tts_request_generator())
                 
+                is_first_audio = True
                 for response in tts_responses:
                     if response.audio_content:
+                        if is_first_audio:
+                            print(f"[LLM-TTS] [{datetime.datetime.now()}] Received FIRST audio packet from Cloud TTS!")
+                            is_first_audio = False
                         asyncio.run_coroutine_threadsafe(
                             websocket.send_bytes(response.audio_content),
                             loop

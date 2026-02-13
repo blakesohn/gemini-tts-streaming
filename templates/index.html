@@ -305,6 +305,10 @@
 
         function connectWebSocket() {
             initAudio();
+            // Clear Monitor Logs
+            document.getElementById('inputStreamLog').innerHTML = '';
+            document.getElementById('outputStreamLog').innerHTML = '';
+
             const status = document.getElementById('wsStatus');
             const connectBtn = document.getElementById('wsConnectBtn');
             const stopBtn = document.getElementById('wsStopBtn');
@@ -487,6 +491,9 @@
             status.innerHTML = "Connecting...";
             responseContainer.style.display = 'block';
             responseDiv.innerHTML = ''; // Clear previous
+            // Clear Monitor Logs
+            document.getElementById('llmTextLog').innerHTML = '';
+            document.getElementById('llmAudioLog').innerHTML = '';
 
             // Resume context if needed
             if (audioContext.state === 'suspended') {
